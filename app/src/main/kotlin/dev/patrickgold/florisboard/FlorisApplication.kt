@@ -26,6 +26,7 @@ import android.content.res.Configuration
 import android.os.Handler
 import android.util.Log
 import androidx.core.os.UserManagerCompat
+import dev.patrickgold.florisboard.ime.nlp.ru.RuAutocorrect
 import dev.patrickgold.florisboard.app.FlorisPreferenceModel
 import dev.patrickgold.florisboard.app.FlorisPreferenceStore
 import dev.patrickgold.florisboard.app.NoBackupPreferenceModel
@@ -107,6 +108,7 @@ class FlorisApplication : Application() {
             storageController = AndroidStorageController(this)
             extensionController = ExtensionController(storageController)
             imeController = ImeController(storageController, clipboardManager.value)
+            RuAutocorrect.init(this)
             themeController = ThemeController(
                 storageController,
                 extensionController,

@@ -45,6 +45,7 @@ import dev.patrickgold.florisboard.ime.media.emoji.EmojiSuggestionType
 import dev.patrickgold.florisboard.ime.nlp.BreakIterators
 import dev.patrickgold.florisboard.ime.nlp.ClipboardSuggestionCandidate
 import dev.patrickgold.florisboard.ime.nlp.SuggestionCandidate
+import dev.patrickgold.florisboard.ime.nlp.ru.RuAutocorrect
 import dev.patrickgold.florisboard.ime.text.key.KeyVariation
 import dev.patrickgold.florisboard.lib.FlorisLocale
 import dev.patrickgold.florisboard.lib.devtools.flogDebug
@@ -62,6 +63,7 @@ import org.k3lp.lib.text.K3Descriptor
 import org.k3lp.lib.text.K3String
 import org.k3lp.lib.text.K3StringOrDescriptor
 import org.k3lp.lib.text.asK3String
+import org.k3lp.lib.text.unicode.NormalizationForm
 import org.k3lp.model.K3Model
 import org.k3lp.model.layer.K3LayerId
 import org.k3lp.runtime.K3Content
@@ -93,6 +95,24 @@ class ImeController(
     private val breakIterators = BreakIterators()
     private val expectedContentQueue = ExpectedContentQueue()
     private var emitInterceptor = AtomicReference<EmitInterceptor?>(null)
+
+    /**
+     * State of the last autocorrection, which allows to undo / cycle / learn it with vertical swipes.
+     * Only valid right after the correction (until the next text change or cursor movement).
+     */
+    @Volatile
+    private var armedCorrection: ArmedCorrection? = null
+
+    private class ArmedCorrection(
+        val original: String,
+        val candidates: List<String>,
+        val index: Int,
+        val showingOriginal: Boolean,
+    )
+
+    class CorrectionGestureResult(val handled: Boolean, val message: String? = null)
+
+    fun hasArmedCorrection(): Boolean = armedCorrection != null
 
     val activeTouchModelOptions = combine<Any, TouchModelOptions>(
         prefs.keyboard.numberRow.asFlow(),
@@ -303,10 +323,89 @@ class ImeController(
                 flogDebug { "DEDUPLICATED!!1" }
                 return
             }
+            armedCorrection = null
             resetContent(newSelection, state.editor.getSurroundingText(50, 10))
             expectedContentQueue.push(state.content)
         }
 
+        private fun replaceInTextBefore(tailLen: Int, oldLen: Int, newText: String) {
+            val content = state.content
+            val sel = content.selection
+            val before = content.surroundingText.textBefore
+            val endIdx = before.length - tailLen
+            val startIdx = endIdx - oldLen
+            if (startIdx < 0 || endIdx > before.length) return
+            val newBefore = before.substring(0, startIdx) + newText + before.substring(endIdx)
+            val absStart = sel.min - (before.length - startIdx)
+            val absEnd = sel.min - tailLen
+            val newSelection = K3TextRange(sel.min + newText.length - oldLen)
+            state = state.copy(
+                content = content.copy(
+                    selection = newSelection,
+                    composition = null,
+                    surroundingText = content.surroundingText.copy(textBefore = newBefore),
+                    inputContext = newBefore.asK3String().normalize(NormalizationForm.NFD),
+                ),
+            )
+            state.editor.replaceText(absStart..<absEnd, newText, newSelection, null)
+            expectedContentQueue.push(state.content)
+        }
+
+        private fun tryAutocorrectBeforeSpace(): ArmedCorrection? {
+            if (!RuAutocorrect.isReady()) return null
+            if (!state.flags.isComposingEnabled) return null
+            if (state.content.selection.isNotCollapsed()) return null
+            val before = state.content.surroundingText.textBefore
+            val match = TRAILING_CYRILLIC_WORD.find(before) ?: return null
+            val start = match.range.first
+            if (start > 0) {
+                val prev = before[start - 1]
+                if (prev.isLetterOrDigit() || prev in "-'’@_/.#") return null
+            }
+            val word = match.value
+            if (word.first().isUpperCase()) {
+                // Capitalized words in the middle of a sentence are most likely names, leave them alone.
+                val head = before.substring(0, start).trimEnd(' ', '\t')
+                val isSentenceStart = head.isEmpty() || head.last() in ".!?\n"
+                if (!isSentenceStart) return null
+            }
+            val correction = RuAutocorrect.correct(word) ?: return null
+            val applied = correction.candidates.firstOrNull() ?: return null
+            replaceInTextBefore(tailLen = 0, oldLen = word.length, newText = applied)
+            return ArmedCorrection(correction.original, correction.candidates, 0, false)
+        }
+
+        /**
+         * Handles a vertical swipe right after an autocorrection.
+         * Swipe up: restore the original word; swipe up again: add the word to the user dictionary.
+         * Swipe down: next correction variant.
+         */
+        fun performCorrectionGesture(up: Boolean): CorrectionGestureResult {
+            val armed = armedCorrection ?: return CorrectionGestureResult(false)
+            val before = state.content.surroundingText.textBefore
+            val shown = if (armed.showingOriginal) armed.original else armed.candidates[armed.index]
+            if (state.content.selection.isNotCollapsed() || !before.endsWith("$shown ")) {
+                armedCorrection = null
+                return CorrectionGestureResult(false)
+            }
+            if (up) {
+                if (!armed.showingOriginal) {
+                    replaceInTextBefore(tailLen = 1, oldLen = shown.length, newText = armed.original)
+                    armedCorrection = ArmedCorrection(armed.original, armed.candidates, armed.index, true)
+                    return CorrectionGestureResult(true)
+                }
+                RuAutocorrect.learn(armed.original)
+                armedCorrection = null
+                return CorrectionGestureResult(true, "Слово «${armed.original}» добавлено в словарь")
+            }
+            if (!armed.showingOriginal && armed.candidates.size <= 1) {
+                return CorrectionGestureResult(true, "Других вариантов нет")
+            }
+            val newIndex = if (armed.showingOriginal) 0 else (armed.index + 1) % armed.candidates.size
+            replaceInTextBefore(tailLen = 1, oldLen = shown.length, newText = armed.candidates[newIndex])
+            armedCorrection = ArmedCorrection(armed.original, armed.candidates, newIndex, false)
+            return CorrectionGestureResult(true)
+        }
         override fun emit(value: K3StringOrDescriptor) {
             val interceptor = emitInterceptor.load()
             if (interceptor != null) {
@@ -317,17 +416,23 @@ class ImeController(
         }
 
         override fun emitText(value: K3String) {
+            val isSpace = value.toText() == " "
+            val pending = if (isSpace) tryAutocorrectBeforeSpace() else null
+            armedCorrection = null
             super.emitText(value)
-            expectedContentQueue.push(state.content)
-            reevaluateInputShiftState()
+            if (pending != null && state.content.surroundingText.textBefore.endsWith(pending.candidates[0] + " ")) {
+                armedCorrection = pending
+            }
+            expectedContentQueue.push(state.content)            reevaluateInputShiftState()
         }
 
         override fun emitDescriptor(descriptor: K3Descriptor) {
             val windowController = FlorisImeService.windowControllerOrNull()
+            armedCorrection = null
             when (descriptor) {
+                ImeActions.ToggleAutocorrect -> RuAutocorrect.toggle()
                 // TODO once k3lp supports this remove
-                ImeActions.Delete -> emitForwardDelete()
-                // TODO evaluate use of modern cursor anchor API instead of sending raw key events
+                ImeActions.Delete -> emitForwardDelete()                // TODO evaluate use of modern cursor anchor API instead of sending raw key events
                 ImeActions.ArrowDown -> state.editor.sendDownUpKeyEvent(KeyEvent.KEYCODE_DPAD_DOWN)
                 ImeActions.ArrowLeft -> state.editor.sendDownUpKeyEvent(KeyEvent.KEYCODE_DPAD_LEFT)
                 ImeActions.ArrowRight -> state.editor.sendDownUpKeyEvent(KeyEvent.KEYCODE_DPAD_RIGHT)
@@ -428,6 +533,7 @@ class ImeController(
         }
 
         override fun emitBackspace() {
+            armedCorrection = null
             super.emitBackspace()
             expectedContentQueue.push(state.content)
         }
@@ -614,6 +720,7 @@ class ImeController(
         }
 
         fun handleFinishInputView() {
+            armedCorrection = null
             resetContent()
             state = state.copy(editor = ImeEditor.Disconnected)
             expectedContentQueue.clear()
@@ -652,6 +759,7 @@ class ImeController(
 
     companion object {
         private val NEWLINE_SEQ = "\n".asK3String()
+        private val TRAILING_CYRILLIC_WORD = Regex("[А-Яа-яЁё]+$")
     }
 }
 

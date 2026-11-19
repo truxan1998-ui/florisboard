@@ -60,7 +60,9 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.k3lp.model.K3Model
 import org.k3lp.model.layer.K3LayerId
+import kotlin.math.abs
 import kotlin.math.pow
+import kotlin.math.sqrt
 import kotlin.time.Duration
 
 sealed interface TrackedPointer {
@@ -324,16 +326,36 @@ class PointerTracker(
         trackedOutputPointer.value?.takeIf { it.id == up.id }?.let { trackedPointer ->
             trackedPointer.longPress.extendedJob?.cancel()
             trackedPointer.repeatJob?.cancel()
-            imeController.updateState {
-                val output = when {
-                    trackedPointer.downKey == trackedMultiTapSeq.value?.touchKey -> null
-                    trackedPointer.longPress.shouldShowExtendedPopup() -> {
-                        trackedPointer.longPress.extendedKeys.getOrNull(trackedPointer.longPress.extendedFocusedIndex)
-                            ?.data?.output
-                    }
-                    else -> trackedPointer.downKey.attrs.output
+            // Vertical swipe right after an autocorrection: undo / learn / next variant instead of typing the key.
+            val swipeMin = sqrt(peekDistanceSqMin)
+            val swipeDx = up.position.x - trackedPointer.down.position.x
+            val swipeDy = up.position.y - trackedPointer.down.position.y
+            var gestureResult: ImeController.CorrectionGestureResult? = null
+            if (imeController.hasArmedCorrection() &&
+                abs(swipeDy) >= swipeMin &&
+                abs(swipeDy) > 1.5f * abs(swipeDx) &&
+                !trackedPointer.longPress.shouldShowExtendedPopup()
+            ) {
+                imeController.updateState {
+                    gestureResult = performCorrectionGesture(up = swipeDy < 0f)
                 }
-                output?.let { emit(it) }
+            }
+            val gesture = gestureResult
+            if (gesture != null && gesture.handled) {
+                interactionController.performFeedback(InteractionKind.GestureSwipe)
+                gesture.message?.let { interactionController.showShortToast(it) }
+            } else {
+                imeController.updateState {
+                    val output = when {
+                        trackedPointer.downKey == trackedMultiTapSeq.value?.touchKey -> null
+                        trackedPointer.longPress.shouldShowExtendedPopup() -> {
+                            trackedPointer.longPress.extendedKeys.getOrNull(trackedPointer.longPress.extendedFocusedIndex)
+                                ?.data?.output
+                        }
+                        else -> trackedPointer.downKey.attrs.output
+                    }
+                    output?.let { emit(it) }
+                }
             }
             trackedPeekPointer.update { it?.copy(peekMustSwitchBack = true) }
             trackedOutputPointer.value = null
