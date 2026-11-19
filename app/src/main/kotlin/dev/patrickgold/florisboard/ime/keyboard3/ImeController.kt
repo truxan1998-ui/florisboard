@@ -424,7 +424,8 @@ class ImeController(
             if (pending != null && state.content.surroundingText.textBefore.endsWith(pending.candidates[0] + " ")) {
                 armedCorrection = pending
             }
-            expectedContentQueue.push(state.content)            reevaluateInputShiftState()
+            expectedContentQueue.push(state.content)
+            reevaluateInputShiftState()
         }
 
         override fun emitDescriptor(descriptor: K3Descriptor) {
@@ -433,7 +434,8 @@ class ImeController(
             when (descriptor) {
                 ImeActions.ToggleAutocorrect -> RuAutocorrect.toggle()
                 // TODO once k3lp supports this remove
-                ImeActions.Delete -> emitForwardDelete()                // TODO evaluate use of modern cursor anchor API instead of sending raw key events
+                ImeActions.Delete -> emitForwardDelete()
+                // TODO evaluate use of modern cursor anchor API instead of sending raw key events
                 ImeActions.ArrowDown -> state.editor.sendDownUpKeyEvent(KeyEvent.KEYCODE_DPAD_DOWN)
                 ImeActions.ArrowLeft -> state.editor.sendDownUpKeyEvent(KeyEvent.KEYCODE_DPAD_LEFT)
                 ImeActions.ArrowRight -> state.editor.sendDownUpKeyEvent(KeyEvent.KEYCODE_DPAD_RIGHT)
