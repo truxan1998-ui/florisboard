@@ -314,6 +314,11 @@ class KeyboardManager(context: Context) : InputKeyEventReceiver {
     )
 
     private val cyrillicWordRegex = Regex("[А-Яа-яЁё]+")
+    private val cyrillicEndRegex = Regex("[А-Яа-яЁё]$")
+    private val punctuationAfterWordCodes = setOf('.'.code, ','.code, '!'.code, '?'.code, ';'.code, ':'.code)
+
+    @Volatile
+    private var spaceAfterWord = false
 
     fun hasArmedCorrection(): Boolean = armedCorrection != null
 
@@ -369,6 +374,7 @@ class KeyboardManager(context: Context) : InputKeyEventReceiver {
         val tail = ic.getTextBeforeCursor(shown.length + 1, 0)?.toString()
         if (tail != "$shown ") {
             armedCorrection = null
+            RuAutocorrect.showToast("Исправление уже недоступно")
             return false
         }
         if (up) {
@@ -650,6 +656,9 @@ class KeyboardManager(context: Context) : InputKeyEventReceiver {
      * enabled by the user.
      */
     private fun handleSpace(data: KeyData) {
+        spaceAfterWord = false
+        val cyrWordBeforeSpace = subtypeManager.activeSubtype.primaryLocale.language == "ru" &&
+            cyrillicEndRegex.containsMatchIn(editorInstance.activeContent.textBeforeSelection)
         val armed = tryAutocorrectBeforeSpace()
         val candidate = if (armed == null) nlpManager.getAutoCommitCandidate() else null
         candidate?.let { commitCandidate(it) }
@@ -679,6 +688,7 @@ class KeyboardManager(context: Context) : InputKeyEventReceiver {
             editorInstance.commitText(KeyCode.SPACE.toChar().toString())
         }
         armedCorrection = armed
+        spaceAfterWord = armed != null || cyrWordBeforeSpace
     }
 
     /**
@@ -789,7 +799,17 @@ class KeyboardManager(context: Context) : InputKeyEventReceiver {
     }
 
     override fun onInputKeyUp(data: KeyData) = activeState.batchEdit {
-        if (data.code != KeyCode.SPACE) armedCorrection = null
+        val wasSpaceAfterWord = spaceAfterWord
+        if (data.code != KeyCode.SPACE) {
+            armedCorrection = null
+            spaceAfterWord = false
+        }
+        if (wasSpaceAfterWord && data.type == KeyType.CHARACTER && data.code in punctuationAfterWordCodes &&
+            editorInstance.activeContent.textBeforeSelection.endsWith(" ")
+        ) {
+            // Punctuation right after "word + space" attaches to the word.
+            editorInstance.deleteBackwards(OperationUnit.CHARACTERS)
+        }
         when (data.code) {
             KeyCode.ARROW_DOWN,
             KeyCode.ARROW_LEFT,

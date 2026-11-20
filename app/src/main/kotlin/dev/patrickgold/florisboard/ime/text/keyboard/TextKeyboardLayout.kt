@@ -516,7 +516,10 @@ private class TextKeyboardLayoutController(
                 for (pointer in pointerMap) {
                     if (pointer.id == pointerId) {
                         pointer.index = pointerIndex
-                        if (swipeGestureDetector.onTouchUp(event, pointer) || pointer.hasTriggeredGestureMove) {
+                        if (tryCorrectionSwipe(event, pointer)) {
+                            swipeGestureDetector.onTouchCancel(event, pointer)
+                            onTouchCancelInternal(event, pointer)
+                        } else if (swipeGestureDetector.onTouchUp(event, pointer) || pointer.hasTriggeredGestureMove) {
                             if (pointer.hasTriggeredGestureMove &&
                                 pointer.initialKey?.computedData?.code == KeyCode.DELETE &&
                                 prefs.gestures.deleteKeySwipeLeft.get() != SwipeAction.SELECT_CHARACTERS_PRECISELY &&
@@ -707,6 +710,21 @@ private class TextKeyboardLayoutController(
             pointer.activeKey = null
         }
         pointer.hasTriggeredGestureMove = false
+    }
+
+    /**
+     * Vertical swipe right after an autocorrection (undo / learn / next variant). Unlike regular swipe gestures
+     * this does not require a fast flick, only a short vertical movement.
+     */
+    private fun tryCorrectionSwipe(event: MotionEvent, pointer: TouchPointer): Boolean {
+        if (!keyboardManager.hasArmedCorrection()) return false
+        val code = pointer.initialKey?.computedData?.code ?: return false
+        if (code < KeyCode.SPACE) return false
+        if (popupUiController.isShowingExtendedPopup) return false
+        val dx = dev.patrickgold.florisboard.lib.util.ViewUtils.px2dp(event.getX(pointer.index)) - pointer.firstX
+        val dy = dev.patrickgold.florisboard.lib.util.ViewUtils.px2dp(event.getY(pointer.index)) - pointer.firstY
+        if (kotlin.math.abs(dy) < 24f || kotlin.math.abs(dy) < 1.5f * kotlin.math.abs(dx)) return false
+        return keyboardManager.handleCorrectionGesture(up = dy < 0f)
     }
 
     override fun onSwipe(event: SwipeGesture.Event): Boolean {
