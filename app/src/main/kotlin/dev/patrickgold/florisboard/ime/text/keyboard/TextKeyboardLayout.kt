@@ -715,6 +715,16 @@ private class TextKeyboardLayoutController(
         val activeKey = pointer.activeKey
         flogDebug(LogTopic.TEXT_KEYBOARD_VIEW)
 
+        if (event.type == SwipeGesture.Type.TOUCH_UP &&
+            (event.direction == SwipeGesture.Direction.UP || event.direction == SwipeGesture.Direction.DOWN) &&
+            initialKey.computedData.code >= KeyCode.SPACE &&
+            !popupUiController.isShowingExtendedPopup &&
+            keyboardManager.hasArmedCorrection() &&
+            keyboardManager.handleCorrectionGesture(up = event.direction == SwipeGesture.Direction.UP)
+        ) {
+            return true
+        }
+
         return when (initialKey.computedData.code) {
             KeyCode.DELETE -> handleDeleteSwipe(event)
             KeyCode.SPACE, KeyCode.CJK_SPACE -> handleSpaceSwipe(event)

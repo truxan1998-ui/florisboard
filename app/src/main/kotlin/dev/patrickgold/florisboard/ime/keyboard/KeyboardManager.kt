@@ -24,7 +24,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.MutableLiveData
+import android.view.inputmethod.InputConnection
 import dev.patrickgold.florisboard.FlorisImeService
+import dev.patrickgold.florisboard.ime.nlp.ru.RuAutocorrect
 import dev.patrickgold.florisboard.R
 import dev.patrickgold.florisboard.app.FlorisPreferenceStore
 import dev.patrickgold.florisboard.appContext
@@ -125,6 +127,7 @@ class KeyboardManager(context: Context) : InputKeyEventReceiver {
     ).also { it.keyEventReceiver = this }
 
     init {
+        RuAutocorrect.init(appContext)
         scope.launch(Dispatchers.Main.immediate) {
             resources.anyChanged.observeForever {
                 updateActiveEvaluators {
@@ -294,6 +297,99 @@ class KeyboardManager(context: Context) : InputKeyEventReceiver {
             is ClipboardSuggestionCandidate -> editorInstance.commitClipboardItem(candidate.clipboardItem)
             else -> editorInstance.commitCompletion(candidate)
         }
+    }
+
+    /**
+     * State of the last autocorrection, which allows to undo / cycle / learn it with vertical swipes.
+     * Only valid right after the correction (until the next key input).
+     */
+    @Volatile
+    private var armedCorrection: ArmedCorrection? = null
+
+    private class ArmedCorrection(
+        val original: String,
+        val candidates: List<String>,
+        val index: Int,
+        val showingOriginal: Boolean,
+    )
+
+    private val cyrillicWordRegex = Regex("[А-Яа-яЁё]+")
+
+    fun hasArmedCorrection(): Boolean = armedCorrection != null
+
+    private fun tryAutocorrectBeforeSpace(): ArmedCorrection? {
+        armedCorrection = null
+        if (!RuAutocorrect.isReady()) return null
+        if (subtypeManager.activeSubtype.primaryLocale.language != "ru") return null
+        if (editorInstance.activeInfo.isRawInputEditor) return null
+        val content = editorInstance.activeContent
+        if (!content.composing.isValid || content.selection.isSelectionMode) return null
+        val word = content.composingText
+        if (!cyrillicWordRegex.matches(word)) return null
+        val before = content.textBeforeSelection
+        if (!before.endsWith(word)) return null
+        val start = before.length - word.length
+        if (start > 0) {
+            val prev = before[start - 1]
+            if (prev.isLetterOrDigit() || prev in "-'’@_/.#") return null
+        }
+        if (word.first().isUpperCase()) {
+            // Capitalized words in the middle of a sentence are most likely names, leave them alone.
+            val head = before.substring(0, start).trimEnd(' ', '\t')
+            val isSentenceStart = head.isEmpty() || head.last() in ".!?\n"
+            if (!isSentenceStart) return null
+        }
+        val correction = RuAutocorrect.correct(word) ?: return null
+        val applied = correction.candidates.firstOrNull() ?: return null
+        if (!editorInstance.finalizeComposingText(applied)) return null
+        return ArmedCorrection(correction.original, correction.candidates, 0, false)
+    }
+
+    private fun replaceBeforeCursor(ic: InputConnection, deleteLen: Int, text: String) {
+        ic.beginBatchEdit()
+        ic.finishComposingText()
+        ic.deleteSurroundingText(deleteLen, 0)
+        ic.commitText(text, 1)
+        ic.endBatchEdit()
+    }
+
+    /**
+     * Handles a vertical swipe right after an autocorrection. Returns true if the swipe was consumed.
+     * Swipe up: restore the original word; swipe up again: add the word to the user dictionary.
+     * Swipe down: next correction variant.
+     */
+    fun handleCorrectionGesture(up: Boolean): Boolean {
+        val armed = armedCorrection ?: return false
+        val ic = FlorisImeService.currentInputConnection()
+        if (ic == null) {
+            armedCorrection = null
+            return false
+        }
+        val shown = if (armed.showingOriginal) armed.original else armed.candidates[armed.index]
+        val tail = ic.getTextBeforeCursor(shown.length + 1, 0)?.toString()
+        if (tail != "$shown ") {
+            armedCorrection = null
+            return false
+        }
+        if (up) {
+            if (!armed.showingOriginal) {
+                replaceBeforeCursor(ic, shown.length + 1, armed.original + " ")
+                armedCorrection = ArmedCorrection(armed.original, armed.candidates, armed.index, true)
+                return true
+            }
+            RuAutocorrect.learn(armed.original)
+            armedCorrection = null
+            RuAutocorrect.showToast("Слово «${armed.original}» добавлено в словарь")
+            return true
+        }
+        if (!armed.showingOriginal && armed.candidates.size <= 1) {
+            RuAutocorrect.showToast("Других вариантов нет")
+            return true
+        }
+        val newIndex = if (armed.showingOriginal) 0 else (armed.index + 1) % armed.candidates.size
+        replaceBeforeCursor(ic, shown.length + 1, armed.candidates[newIndex] + " ")
+        armedCorrection = ArmedCorrection(armed.original, armed.candidates, newIndex, false)
+        return true
     }
 
     fun commitGesture(word: String) {
@@ -554,7 +650,8 @@ class KeyboardManager(context: Context) : InputKeyEventReceiver {
      * enabled by the user.
      */
     private fun handleSpace(data: KeyData) {
-        val candidate = nlpManager.getAutoCommitCandidate()
+        val armed = tryAutocorrectBeforeSpace()
+        val candidate = if (armed == null) nlpManager.getAutoCommitCandidate() else null
         candidate?.let { commitCandidate(it) }
         if (prefs.keyboard.spaceBarSwitchesToCharacters.get()) {
             when (activeState.keyboardMode) {
@@ -581,6 +678,7 @@ class KeyboardManager(context: Context) : InputKeyEventReceiver {
                 candidate != null) { /* Do nothing */ } else {
             editorInstance.commitText(KeyCode.SPACE.toChar().toString())
         }
+        armedCorrection = armed
     }
 
     /**
@@ -610,10 +708,7 @@ class KeyboardManager(context: Context) : InputKeyEventReceiver {
      * Handles a [KeyCode.TOGGLE_AUTOCORRECT] event.
      */
     private fun handleToggleAutocorrect() {
-        lastToastReference.get()?.cancel()
-        lastToastReference = WeakReference(
-            appContext.showLongToastSync("Autocorrect toggle is a placeholder and not yet implemented")
-        )
+        RuAutocorrect.toggle()
     }
 
     /**
@@ -694,6 +789,7 @@ class KeyboardManager(context: Context) : InputKeyEventReceiver {
     }
 
     override fun onInputKeyUp(data: KeyData) = activeState.batchEdit {
+        if (data.code != KeyCode.SPACE) armedCorrection = null
         when (data.code) {
             KeyCode.ARROW_DOWN,
             KeyCode.ARROW_LEFT,
