@@ -439,6 +439,8 @@ private class TextKeyboardLayoutController(
                 val pointerId = event.getPointerId(pointerIndex)
                 val pointer = pointerMap.add(pointerId, pointerIndex)
                 if (pointer != null) {
+                    pointer.downX = event.getX(pointer.index)
+                    pointer.downY = event.getY(pointer.index)
                     swipeGestureDetector.onTouchDown(event, pointer)
                     onTouchDownInternal(event, pointer)
                 }
@@ -462,6 +464,8 @@ private class TextKeyboardLayoutController(
                 }
                 val pointer = pointerMap.add(pointerId, pointerIndex)
                 if (pointer != null) {
+                    pointer.downX = event.getX(pointer.index)
+                    pointer.downY = event.getY(pointer.index)
                     swipeGestureDetector.onTouchDown(event, pointer)
                     onTouchDownInternal(event, pointer)
                 }
@@ -721,8 +725,8 @@ private class TextKeyboardLayoutController(
         val code = pointer.initialKey?.computedData?.code ?: return false
         if (code < KeyCode.SPACE) return false
         if (popupUiController.isShowingExtendedPopup) return false
-        val dx = dev.patrickgold.florisboard.lib.util.ViewUtils.px2dp(event.getX(pointer.index)) - pointer.firstX
-        val dy = dev.patrickgold.florisboard.lib.util.ViewUtils.px2dp(event.getY(pointer.index)) - pointer.firstY
+        val dx = dev.patrickgold.florisboard.lib.util.ViewUtils.px2dp(event.getX(pointer.index) - pointer.downX)
+        val dy = dev.patrickgold.florisboard.lib.util.ViewUtils.px2dp(event.getY(pointer.index) - pointer.downY)
         if (kotlin.math.abs(dy) < 24f || kotlin.math.abs(dy) < 1.5f * kotlin.math.abs(dx)) return false
         return keyboardManager.handleCorrectionGesture(up = dy < 0f)
     }
@@ -1007,6 +1011,8 @@ private class TextKeyboardLayoutController(
     }
 
     private class TouchPointer : Pointer() {
+        var downX: Float = 0.0f
+        var downY: Float = 0.0f
         var initialKey: TextKey? = null
         var activeKey: TextKey? = null
         var hasTriggeredGestureMove: Boolean = false
