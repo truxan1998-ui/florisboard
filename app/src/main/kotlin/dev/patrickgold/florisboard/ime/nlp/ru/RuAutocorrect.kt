@@ -42,9 +42,24 @@ object RuAutocorrect {
     private const val POOL_SIZE = 100_000
     private const val MAX_CANDIDATES = 6
     private const val SEARCH_CUTOFF = 2.0
-    private const val AUTO_CUTOFF = 1.2
+    private const val AUTO_CUTOFF = 1.0
     private const val MIN_AUTO_COUNT = 50
 
+    // A known word that is rare (below DOMINATED_MAX_COUNT) is treated as a typo, if a close word
+    // is at least DOMINANCE_RATIO times more frequent. The dictionary is built from subtitles and
+    // contains a lot of typos with very low counts.
+    private const val DOMINATED_MAX_COUNT = 500
+    private const val DOMINANCE_RATIO = 60
+    private const val MIN_DOMINANT_COUNT = 2000
+
+    // Names, brands and local places that are not (or rarely) in the frequency dictionary.
+    private val EXTRA_WORDS = listOf(
+        "телеграм", "телеграма", "ватсап", "вотсап", "вайбер", "инстаграм", "ютуб", "гугл", "яндекс", "вконтакте",
+        "тикток", "сбербанк", "сбер", "озон", "авито", "алиса", "вайлдберриз", "андроид", "айфон", "вайфай",
+        "ковдор", "ковдора", "ковдору", "ковдором", "ковдоре", "ковдорский", "ковдорская", "ковдорского", "ковдорском",
+        "мурманск", "мурманска", "мурманске", "мурманская", "мурманской", "мончегорск", "апатиты", "оленегорск",
+        "кировск", "ловозеро", "полярные", "зори", "гок", "тэц", "ппр", "лот",
+    )
     class Correction(
         /** The word as it was typed. */
         val original: String,
@@ -62,7 +77,7 @@ object RuAutocorrect {
     var enabled = true
         private set
 
-    private var known: Set<String> = emptySet()
+    private var knownCounts: Map<String, Int> = emptyMap()
     private var poolWords: Array<String> = emptyArray()
     private var poolNorm: Array<String> = emptyArray()
     private var poolCounts: IntArray = IntArray(0)
@@ -103,7 +118,7 @@ object RuAutocorrect {
 
     private fun load(ctx: Context) {
         try {
-            val knownSet = HashSet<String>(300_000)
+            val knownMap = HashMap<String, Int>(300_000)
             val words = ArrayList<String>(POOL_SIZE)
             val counts = ArrayList<Int>(POOL_SIZE)
             ctx.assets.open(ASSET_PATH).bufferedReader(Charsets.UTF_8).useLines { lines ->
@@ -112,7 +127,9 @@ object RuAutocorrect {
                     if (sep <= 0) continue
                     val word = line.substring(0, sep)
                     val count = line.substring(sep + 1).toIntOrNull() ?: continue
-                    knownSet.add(norm(word))
+                    val nk = norm(word)
+                    val prevCount = knownMap[nk]
+                    if (prevCount == null || count > prevCount) knownMap[nk] = count
                     if (words.size < POOL_SIZE) {
                         words.add(word)
                         counts.add(count)
@@ -129,7 +146,8 @@ object RuAutocorrect {
                 }
             } catch (_: Exception) {
             }
-            known = knownSet
+            for (extra in EXTRA_WORDS) knownMap[norm(extra)] = 5000
+            knownCounts = knownMap
             poolWords = words.toTypedArray()
             poolNorm = Array(words.size) { norm(words[it]) }
             poolCounts = counts.toIntArray()
@@ -183,10 +201,7 @@ object RuAutocorrect {
 
     private fun norm(s: String): String = s.lowercase().replace('ё', 'е')
 
-    private fun isKnown(word: String): Boolean {
-        val key = norm(word)
-        return known.contains(key) || userWords.contains(key)
-    }
+    private fun isUserWord(word: String): Boolean = userWords.contains(norm(word))
 
     /**
      * Returns a correction for [typed] or null, if the word is fine or no confident correction exists.
@@ -195,9 +210,13 @@ object RuAutocorrect {
         if (!isReady()) return null
         if (typed.length < 3 || typed.length > 24) return null
         if (typed.all { it.isUpperCase() }) return null
-        if (isKnown(typed)) return null
+        if (isUserWord(typed)) return null
 
         val target = norm(typed)
+        val ownCount: Int? = knownCounts[target]
+        // Frequent known words are always fine.
+        if (ownCount != null && ownCount >= DOMINATED_MAX_COUNT) return null
+
         val len = target.length
         val hits = ArrayList<Hit>()
         val bufSize = len + 4
@@ -212,16 +231,22 @@ object RuAutocorrect {
             val dl = cand.length - len
             if (dl < -2 || dl > 2) continue
             val d = distance(target, cand, SEARCH_CUTOFF, rowA, rowB, rowC)
-            if (d <= SEARCH_CUTOFF) {
-                hits.add(Hit(words[i], d, counts[i], ln(counts[i].toDouble() + 1.0) - 4.0 * d))
-            }
+            if (d <= 0.0 || d > SEARCH_CUTOFF) continue
+            hits.add(Hit(words[i], d, counts[i], ln(counts[i].toDouble() + 1.0) - 4.0 * d))
         }
         if (hits.isEmpty()) return null
         hits.sortByDescending { it.score }
 
         val limit = if (len == 3) 1.0 else AUTO_CUTOFF
-        val auto = hits.firstOrNull {
-            it.cost <= limit && it.count >= MIN_AUTO_COUNT && (len > 3 || it.count >= 3000)
+        val auto = if (ownCount == null) {
+            hits.firstOrNull {
+                it.cost <= limit && it.count >= MIN_AUTO_COUNT && (len > 3 || it.count >= 3000)
+            }
+        } else {
+            // Known but rare word: only correct it, if a very close word is much more frequent.
+            hits.firstOrNull {
+                it.cost <= 1.0 && it.count >= MIN_DOMINANT_COUNT && it.count.toLong() >= DOMINANCE_RATIO.toLong() * ownCount
+            }
         } ?: return null
 
         val ordered = ArrayList<Hit>()
