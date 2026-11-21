@@ -277,8 +277,24 @@ class NlpManager(context: Context) {
         return runBlocking { getSuggestionProvider(subtype).getFrequencyForWord(subtype, word) }
     }
 
+    @Volatile
+    private var correctionOverride: List<SuggestionCandidate>? = null
+
+    /**
+     * Shows the given candidates instead of regular suggestions (null restores regular suggestions).
+     */
+    fun showCorrectionCandidates(list: List<SuggestionCandidate>?) {
+        correctionOverride = list
+        scope.launch { assembleCandidates() }
+    }
+
     private fun assembleCandidates() {
         runBlocking {
+            val correction = correctionOverride
+            if (correction != null) {
+                activeCandidates = correction
+                return@runBlocking
+            }
             val candidates = when {
                 isSuggestionOn() -> {
                     clipboardSuggestionProvider.suggest(

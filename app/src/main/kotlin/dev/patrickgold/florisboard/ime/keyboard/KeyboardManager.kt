@@ -26,7 +26,9 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.MutableLiveData
 import android.view.inputmethod.InputConnection
 import dev.patrickgold.florisboard.FlorisImeService
+import dev.patrickgold.florisboard.ime.nlp.ru.CorrectionCandidate
 import dev.patrickgold.florisboard.ime.nlp.ru.RuAutocorrect
+import kotlin.properties.Delegates
 import dev.patrickgold.florisboard.R
 import dev.patrickgold.florisboard.app.FlorisPreferenceStore
 import dev.patrickgold.florisboard.appContext
@@ -290,6 +292,10 @@ class KeyboardManager(context: Context) : InputKeyEventReceiver {
     }
 
     fun commitCandidate(candidate: SuggestionCandidate) {
+        if (candidate is CorrectionCandidate) {
+            selectCorrectionSlot(candidate.slot)
+            return
+        }
         scope.launch {
             candidate.sourceProvider?.notifySuggestionAccepted(subtypeManager.activeSubtype, candidate)
         }
@@ -300,18 +306,27 @@ class KeyboardManager(context: Context) : InputKeyEventReceiver {
     }
 
     /**
-     * State of the last autocorrection, which allows to undo / cycle / learn it with vertical swipes.
-     * Only valid right after the correction (until the next key input).
+     * State of the last autocorrection, which allows to switch between the typed word, the applied correction and
+     * an alternative with vertical swipes. Only valid right after the correction (until the next key input).
      */
-    @Volatile
-    private var armedCorrection: ArmedCorrection? = null
+    private var armedCorrection: ArmedCorrection? by Delegates.observable<ArmedCorrection?>(null) { _, old, new ->
+        if (old != null || new != null) updateCorrectionUi(new)
+    }
 
     private class ArmedCorrection(
         val original: String,
         val candidates: List<String>,
-        val index: Int,
-        val showingOriginal: Boolean,
-    )
+        /** 0 = typed word, 1 = applied correction, 2 = alternative correction */
+        val pos: Int,
+        val altIndex: Int,
+    ) {
+        val shown: String
+            get() = when (pos) {
+                0 -> original
+                1 -> candidates[0]
+                else -> candidates[altIndex]
+            }
+    }
 
     private val cyrillicWordRegex = Regex("[А-Яа-яЁё]+")
     private val cyrillicEndRegex = Regex("[А-Яа-яЁё]$")
@@ -321,6 +336,20 @@ class KeyboardManager(context: Context) : InputKeyEventReceiver {
     private var spaceAfterWord = false
 
     fun hasArmedCorrection(): Boolean = armedCorrection != null
+
+    private fun updateCorrectionUi(armed: ArmedCorrection?) {
+        if (armed == null) {
+            nlpManager.showCorrectionCandidates(null)
+            return
+        }
+        val list = ArrayList<SuggestionCandidate>(3)
+        list.add(CorrectionCandidate(0, armed.original, armed.pos == 0))
+        list.add(CorrectionCandidate(1, armed.candidates[0], armed.pos == 1))
+        if (armed.candidates.size > 1) {
+            list.add(CorrectionCandidate(2, armed.candidates[armed.altIndex], armed.pos == 2))
+        }
+        nlpManager.showCorrectionCandidates(list)
+    }
 
     private fun tryAutocorrectBeforeSpace(): ArmedCorrection? {
         armedCorrection = null
@@ -347,7 +376,7 @@ class KeyboardManager(context: Context) : InputKeyEventReceiver {
         val correction = RuAutocorrect.correct(word) ?: return null
         val applied = correction.candidates.firstOrNull() ?: return null
         if (!editorInstance.finalizeComposingText(applied)) return null
-        return ArmedCorrection(correction.original, correction.candidates, 0, false)
+        return ArmedCorrection(correction.original, correction.candidates, 1, 1)
     }
 
     private fun replaceBeforeCursor(ic: InputConnection, deleteLen: Int, text: String) {
@@ -358,46 +387,75 @@ class KeyboardManager(context: Context) : InputKeyEventReceiver {
         ic.endBatchEdit()
     }
 
-    /**
-     * Handles a vertical swipe right after an autocorrection. Returns true if the swipe was consumed.
-     * Swipe up: restore the original word; swipe up again: add the word to the user dictionary.
-     * Swipe down: next correction variant.
-     */
-    fun handleCorrectionGesture(up: Boolean): Boolean {
-        val armed = armedCorrection ?: return false
+    private fun hasExpectedText(armed: ArmedCorrection, ic: InputConnection): Boolean {
+        val shown = armed.shown
+        val tail = ic.getTextBeforeCursor(shown.length + 1, 0)?.toString()
+        return tail == "$shown "
+    }
+
+    private fun applyCorrectionState(current: ArmedCorrection, target: ArmedCorrection): Boolean {
         val ic = FlorisImeService.currentInputConnection()
         if (ic == null) {
             armedCorrection = null
             return false
         }
-        val shown = if (armed.showingOriginal) armed.original else armed.candidates[armed.index]
-        val tail = ic.getTextBeforeCursor(shown.length + 1, 0)?.toString()
-        if (tail != "$shown ") {
+        if (!hasExpectedText(current, ic)) {
             armedCorrection = null
             RuAutocorrect.showToast("Исправление уже недоступно")
             return false
         }
-        if (up) {
-            if (!armed.showingOriginal) {
-                replaceBeforeCursor(ic, shown.length + 1, armed.original + " ")
-                armedCorrection = ArmedCorrection(armed.original, armed.candidates, armed.index, true)
-                return true
+        replaceBeforeCursor(ic, current.shown.length + 1, target.shown + " ")
+        armedCorrection = target
+        return true
+    }
+
+    /**
+     * Handles a vertical swipe right after an autocorrection. Returns true if the swipe was consumed.
+     * Swipe up moves towards the typed word (and, if already there, adds the word to the user dictionary),
+     * swipe down moves towards the alternative corrections.
+     */
+    fun handleCorrectionGesture(up: Boolean): Boolean {
+        val armed = armedCorrection ?: return false
+        if (up && armed.pos == 0) {
+            val ic = FlorisImeService.currentInputConnection()
+            if (ic == null || !hasExpectedText(armed, ic)) {
+                armedCorrection = null
+                RuAutocorrect.showToast("Исправление уже недоступно")
+                return false
             }
             RuAutocorrect.learn(armed.original)
             armedCorrection = null
             RuAutocorrect.showToast("Слово «${armed.original}» добавлено в словарь")
             return true
         }
-        if (!armed.showingOriginal && armed.candidates.size <= 1) {
-            RuAutocorrect.showToast("Других вариантов нет")
-            return true
+        val target = when {
+            up -> ArmedCorrection(armed.original, armed.candidates, armed.pos - 1, armed.altIndex)
+            armed.pos == 0 -> ArmedCorrection(armed.original, armed.candidates, 1, armed.altIndex)
+            armed.pos == 1 -> {
+                if (armed.candidates.size <= 1) {
+                    RuAutocorrect.showToast("Других вариантов нет")
+                    return true
+                }
+                ArmedCorrection(armed.original, armed.candidates, 2, armed.altIndex)
+            }
+            else -> {
+                if (armed.candidates.size <= 2) return true
+                val next = if (armed.altIndex + 1 < armed.candidates.size) armed.altIndex + 1 else 1
+                ArmedCorrection(armed.original, armed.candidates, 2, next)
+            }
         }
-        val newIndex = if (armed.showingOriginal) 0 else (armed.index + 1) % armed.candidates.size
-        replaceBeforeCursor(ic, shown.length + 1, armed.candidates[newIndex] + " ")
-        armedCorrection = ArmedCorrection(armed.original, armed.candidates, newIndex, false)
-        return true
+        return applyCorrectionState(armed, target)
     }
 
+    /**
+     * Selects one of the three words of the correction strip (tap on the strip).
+     */
+    fun selectCorrectionSlot(slot: Int) {
+        val armed = armedCorrection ?: return
+        if (slot == armed.pos) return
+        if (slot == 2 && armed.candidates.size <= 1) return
+        applyCorrectionState(armed, ArmedCorrection(armed.original, armed.candidates, slot, armed.altIndex))
+    }
     fun commitGesture(word: String) {
         editorInstance.commitGesture(fixCase(word))
     }
@@ -798,18 +856,26 @@ class KeyboardManager(context: Context) : InputKeyEventReceiver {
         }
     }
 
-    override fun onInputKeyUp(data: KeyData) = activeState.batchEdit {
+    override fun onInputKeyUp(data: KeyData) {
         val wasSpaceAfterWord = spaceAfterWord
         if (data.code != KeyCode.SPACE) {
             armedCorrection = null
             spaceAfterWord = false
         }
-        if (wasSpaceAfterWord && data.type == KeyType.CHARACTER && data.code in punctuationAfterWordCodes &&
+        val attachPunctuation = wasSpaceAfterWord && data.type == KeyType.CHARACTER &&
+            data.code in punctuationAfterWordCodes &&
             editorInstance.activeContent.textBeforeSelection.endsWith(" ")
-        ) {
-            // Punctuation right after "word + space" attaches to the word.
+        if (attachPunctuation) {
+            // Punctuation right after "word + space" attaches to the word and is followed by a space.
             editorInstance.deleteBackwards(OperationUnit.CHARACTERS)
         }
+        handleInputKeyUp(data)
+        if (attachPunctuation) {
+            editorInstance.commitText(" ")
+        }
+    }
+
+    private fun handleInputKeyUp(data: KeyData) = activeState.batchEdit {
         when (data.code) {
             KeyCode.ARROW_DOWN,
             KeyCode.ARROW_LEFT,

@@ -20,6 +20,9 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.widget.Toast
+import androidx.compose.ui.graphics.vector.ImageVector
+import dev.patrickgold.florisboard.ime.nlp.SuggestionCandidate
+import dev.patrickgold.florisboard.ime.nlp.SuggestionProvider
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.abs
@@ -323,4 +326,21 @@ object RuAutocorrect {
         }
         return p1[m]
     }
+}
+
+/**
+ * One of (up to) three words shown in the suggestion strip after an autocorrection:
+ * slot 0 = the typed word, slot 1 = the applied correction, slot 2 = an alternative correction.
+ */
+data class CorrectionCandidate(
+    val slot: Int,
+    override val text: CharSequence,
+    val selected: Boolean,
+) : SuggestionCandidate {
+    override val secondaryText: CharSequence? = if (selected) "●" else null
+    override val confidence: Double = 1.0
+    override val isEligibleForAutoCommit: Boolean = false
+    override val isEligibleForUserRemoval: Boolean = false
+    override val icon: ImageVector? = null
+    override val sourceProvider: SuggestionProvider? = null
 }

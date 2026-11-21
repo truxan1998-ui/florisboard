@@ -721,14 +721,31 @@ private class TextKeyboardLayoutController(
      * this does not require a fast flick, only a short vertical movement.
      */
     private fun tryCorrectionSwipe(event: MotionEvent, pointer: TouchPointer): Boolean {
-        if (!keyboardManager.hasArmedCorrection()) return false
         val code = pointer.initialKey?.computedData?.code ?: return false
         if (code < KeyCode.SPACE) return false
         if (popupUiController.isShowingExtendedPopup) return false
         val dx = dev.patrickgold.florisboard.lib.util.ViewUtils.px2dp(event.getX(pointer.index) - pointer.downX)
         val dy = dev.patrickgold.florisboard.lib.util.ViewUtils.px2dp(event.getY(pointer.index) - pointer.downY)
-        if (kotlin.math.abs(dy) < 24f || kotlin.math.abs(dy) < 1.5f * kotlin.math.abs(dx)) return false
-        return keyboardManager.handleCorrectionGesture(up = dy < 0f)
+        val ax = kotlin.math.abs(dx)
+        val ay = kotlin.math.abs(dy)
+        // Vertical swipe right after an autocorrection: switch between typed word / correction / alternative.
+        if (keyboardManager.hasArmedCorrection() && ay >= 24f && ay >= 1.5f * ax) {
+            return keyboardManager.handleCorrectionGesture(up = dy < 0f)
+        }
+        // Horizontal swipes: on the space bar switch the language, on letter keys swipe left deletes a character.
+        if (ax >= 32f && ax >= 1.5f * ay) {
+            if (code == KeyCode.SPACE) {
+                keyboardManager.executeSwipeAction(
+                    if (dx > 0f) SwipeAction.SWITCH_TO_NEXT_SUBTYPE else SwipeAction.SWITCH_TO_PREV_SUBTYPE
+                )
+                return true
+            }
+            if (dx < 0f) {
+                keyboardManager.executeSwipeAction(SwipeAction.DELETE_CHARACTER)
+                return true
+            }
+        }
+        return false
     }
 
     override fun onSwipe(event: SwipeGesture.Event): Boolean {

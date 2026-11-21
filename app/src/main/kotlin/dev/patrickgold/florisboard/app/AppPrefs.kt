@@ -298,11 +298,11 @@ abstract class FlorisPreferenceModel : PreferenceModel() {
         )
         val swipeLeft = enum(
             key = "gestures__swipe_left",
-            default = SwipeAction.SWITCH_TO_NEXT_SUBTYPE,
+            default = SwipeAction.DELETE_CHARACTER,
         )
         val swipeRight = enum(
             key = "gestures__swipe_right",
-            default = SwipeAction.SWITCH_TO_PREV_SUBTYPE,
+            default = SwipeAction.NO_ACTION,
         )
         val spaceBarSwipeUp = enum(
             key = "gestures__space_bar_swipe_up",
@@ -310,11 +310,11 @@ abstract class FlorisPreferenceModel : PreferenceModel() {
         )
         val spaceBarSwipeLeft = enum(
             key = "gestures__space_bar_swipe_left",
-            default = SwipeAction.MOVE_CURSOR_LEFT,
+            default = SwipeAction.NO_ACTION,
         )
         val spaceBarSwipeRight = enum(
             key = "gestures__space_bar_swipe_right",
-            default = SwipeAction.MOVE_CURSOR_RIGHT,
+            default = SwipeAction.NO_ACTION,
         )
         val spaceBarLongPress = enum(
             key = "gestures__space_bar_long_press",
