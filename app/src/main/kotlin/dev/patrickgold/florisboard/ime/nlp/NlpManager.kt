@@ -293,6 +293,7 @@ class NlpManager(context: Context) {
             val correction = correctionOverride
             if (correction != null) {
                 activeCandidates = correction
+                autoExpandCollapseSmartbarActions(correction, NlpInlineAutofill.suggestions.value)
                 return@runBlocking
             }
             val candidates = when {

@@ -262,6 +262,7 @@ class KeyboardManager(context: Context) : InputKeyEventReceiver {
                 KeyboardMode.SYMBOLS2 -> TextKeyData.VIEW_NUMERIC_ADVANCED
                 else -> TextKeyData.VIEW_CHARACTERS
             }
+            SwipeAction.DELETE_CHARACTER -> TextKeyData.DELETE
             SwipeAction.DELETE_WORD -> TextKeyData.DELETE_WORD
             SwipeAction.HIDE_KEYBOARD -> TextKeyData.IME_HIDE_UI
             SwipeAction.INSERT_SPACE -> TextKeyData.SPACE
