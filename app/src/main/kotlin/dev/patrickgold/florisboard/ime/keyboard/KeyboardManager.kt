@@ -863,16 +863,21 @@ class KeyboardManager(context: Context) : InputKeyEventReceiver {
             armedCorrection = null
             spaceAfterWord = false
         }
+        // The text before the cursor is read directly from the input connection, because the cached editor content
+        // can lag behind right after the space was committed.
         val attachPunctuation = wasSpaceAfterWord && data.type == KeyType.CHARACTER &&
             data.code in punctuationAfterWordCodes &&
-            editorInstance.activeContent.textBeforeSelection.endsWith(" ")
+            FlorisImeService.currentInputConnection()?.getTextBeforeCursor(1, 0)?.toString() == " "
         if (attachPunctuation) {
             // Punctuation right after "word + space" attaches to the word and is followed by a space.
             editorInstance.deleteBackwards(OperationUnit.CHARACTERS)
         }
         handleInputKeyUp(data)
         if (attachPunctuation) {
-            editorInstance.commitText(" ")
+            val lastChar = FlorisImeService.currentInputConnection()?.getTextBeforeCursor(1, 0)?.toString()
+            if (lastChar != " ") {
+                editorInstance.commitText(" ")
+            }
         }
     }
 
